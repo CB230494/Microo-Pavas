@@ -4,7 +4,7 @@ import pandas as pd
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import random
-import textwrap
+import re
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -46,7 +46,7 @@ FACTORES = [
     "Otro: especificar.",
 ]
 
-# Colores por factor (22)
+# Colores por factor
 FACTOR_COLORS = {
     FACTORES[0]:  "#e41a1c",  FACTORES[1]:  "#377eb8",  FACTORES[2]:  "#4daf4a",
     FACTORES[3]:  "#984ea3",  FACTORES[4]:  "#ff7f00",  FACTORES[5]:  "#ffff33",
@@ -58,14 +58,14 @@ FACTOR_COLORS = {
     FACTORES[21]: "#b15928",
 }
 
-# Cabecera "nueva" recomendada
+# Cabecera recomendada (sin lat/lng)
 NEW_HEADERS = [
     "date", "barrio", "factores", "delitos_relacionados",
     "ligado_estructura", "nombre_estructura", "observaciones",
-    "lat", "lng", "maps_link"
+    "maps_link"
 ]
 
-# ========= GSPREAD HELPERS =========
+# ========= HELPERS GSPREAD =========
 @st.cache_resource(show_spinner=False)
 def _open_worksheet():
     scopes = [
@@ -84,41 +84,96 @@ def _open_worksheet():
         ws.append_row(NEW_HEADERS)
     if not ws.row_values(1):
         ws.append_row(NEW_HEADERS)
+    _ensure_schema(ws)  # <- ajusta columnas (maps_link, borrar lat/lng)
     return ws
 
 def _current_headers(ws) -> list:
     return [h.strip() for h in ws.row_values(1)]
 
+def _hex_to_rgb01(hex_color: str):
+    hex_color = hex_color.lstrip("#")
+    r = int(hex_color[0:2], 16) / 255.0
+    g = int(hex_color[2:4], 16) / 255.0
+    b = int(hex_color[4:6], 16) / 255.0
+    return {"red": r, "green": g, "blue": b}
+
+def _ensure_schema(ws):
+    """Quita columnas lat/lng si existen y asegura columna maps_link."""
+    headers = _current_headers(ws)
+
+    # eliminar lat y lng si están
+    to_delete = []
+    for name in ["lat", "lng"]:
+        if name in headers:
+            idx = headers.index(name) + 1  # 1-based
+            to_delete.append(idx)
+    for idx in sorted(to_delete, reverse=True):
+        ws.delete_columns(idx)
+    if to_delete:
+        headers = _current_headers(ws)
+
+    # asegurar maps_link
+    if "maps_link" not in headers:
+        ws.update_cell(1, len(headers) + 1, "maps_link")
+
 def append_row(data: dict):
+    """
+    Agrega fila siguiendo el orden de columnas existente en la hoja
+    y pinta la celda del factor con su color.
+    """
     ws = _open_worksheet()
     headers = _current_headers(ws)
 
-    values_new = {
+    # Fórmula Maps
+    maps_formula = f'=HYPERLINK("https://www.google.com/maps?q={data["lat"]},{data["lng"]}","Ver en Maps")'
+
+    values_map = {
+        # nuevo esquema
         "date": data.get("date", ""),
         "barrio": data.get("barrio", ""),
-        "factores": data.get("factores", ""),  # guardamos string (selección única)
+        "factores": data.get("factores", ""),             # selección única
         "delitos_relacionados": data.get("delitos_relacionados", ""),
         "ligado_estructura": data.get("ligado_estructura", ""),
         "nombre_estructura": data.get("nombre_estructura", ""),
         "observaciones": data.get("observaciones", ""),
-        "lat": data.get("lat", ""),
-        "lng": data.get("lng", ""),
-        "maps_link": f'=HYPERLINK("https://www.google.com/maps?q={data.get("lat")},{data.get("lng")}","Ver en Maps")',
-        # compat antiguo:
+        "maps_link": maps_formula,
+        # compat viejo (si la hoja aún tiene estas columnas)
         "timestamp": data.get("date", ""),
         "factor_riesgo": data.get("factores", ""),
     }
 
-    row = [values_new.get(col, "") for col in headers]
-    ws.append_row(row, value_input_option="USER_ENTERED")
+    row_vals = [values_map.get(col, "") for col in headers]
+    ws.append_row(row_vals, value_input_option="USER_ENTERED")
+
+    # Índice de la fila recién agregada
+    last_row = len(ws.get_all_values())
+
+    # Ubicar columna del factor (sea 'factores' o 'factor_riesgo')
+    if "factores" in headers:
+        factor_col = headers.index("factores") + 1
+    elif "factor_riesgo" in headers:
+        factor_col = headers.index("factor_riesgo") + 1
+    else:
+        factor_col = None
+
+    # Pintar la celda del factor con el color correspondiente
+    if factor_col:
+        factor = data.get("factores", "")
+        color_hex = FACTOR_COLORS.get(factor, "#ffffff")
+        ws.format(
+            gspread.utils.rowcol_to_a1(last_row, factor_col),
+            {"backgroundColor": _hex_to_rgb01(color_hex)}
+        )
 
 @st.cache_data(ttl=30, show_spinner=False)
 def read_all_rows() -> pd.DataFrame:
+    """Devuelve DF normalizado. Si no hay lat/lng, los extrae desde maps_link."""
     ws = _open_worksheet()
     rows = ws.get_all_records()
     df_raw = pd.DataFrame(rows)
 
     df = pd.DataFrame()
+    # fecha
     if "date" in df_raw.columns:
         df["date"] = df_raw["date"]
     elif "timestamp" in df_raw.columns:
@@ -134,12 +189,32 @@ def read_all_rows() -> pd.DataFrame:
     else:
         df["factores"] = ""
 
-    for c in ["delitos_relacionados","ligado_estructura","nombre_estructura","observaciones","lat","lng","maps_link"]:
+    for c in ["delitos_relacionados","ligado_estructura","nombre_estructura","observaciones"]:
         df[c] = df_raw[c] if c in df_raw.columns else ""
+
+    # maps_link
+    df["maps_link"] = df_raw["maps_link"] if "maps_link" in df_raw.columns else ""
+
+    # lat/lng: reconstruimos desde maps_link si no existen
+    if "lat" in df_raw.columns and "lng" in df_raw.columns:
+        df["lat"] = df_raw["lat"]
+        df["lng"] = df_raw["lng"]
+    else:
+        lats, lngs = [], []
+        pattern = re.compile(r"maps\?q=(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)")
+        for link in df["maps_link"].fillna(""):
+            m = pattern.search(str(link))
+            if m:
+                lats.append(float(m.group(1)))
+                lngs.append(float(m.group(2)))
+            else:
+                lats.append(None); lngs.append(None)
+        df["lat"] = lats
+        df["lng"] = lngs
 
     return df
 
-# ========= UTILS =========
+# ========= UTILS UI/MAPA =========
 def _jitter(idx: int, base: float = 0.00008) -> float:
     random.seed(idx)
     return (random.random() - 0.5) * base
@@ -208,18 +283,10 @@ with tabs[0]:
         st.subheader("Formulario de encuesta")
         with st.form("form_encuesta", clear_on_submit=True):
             barrio = st.text_input("Barrio *")
-
-            # 🔹 Selección ÚNICA (selectbox)
-            factor_sel = st.selectbox(
-                "Factor de riesgo *",
-                options=FACTORES,
-                index=None,
-                placeholder="Selecciona un factor"
-            )
-
+            factor_sel = st.selectbox("Factor de riesgo *", options=FACTORES, index=None,
+                                      placeholder="Selecciona un factor")
             delitos = st.text_area("Delitos relacionados al factor *", height=70,
                                    placeholder="Ej.: venta de droga, robos, hurtos, sicariato…")
-
             ligado = st.radio("Ligado a estructura criminal *", ["No", "Sí"], index=0, horizontal=True)
             nombre_estructura = st.text_input("Nombre de la estructura ligada (si aplica)")
             observ = st.text_area("Observaciones", height=90)
@@ -227,23 +294,18 @@ with tabs[0]:
             submitted = st.form_submit_button("Guardar en Google Sheets")
 
         if submitted:
-            errors = []
-            if not barrio.strip():
-                errors.append("Indica el **Barrio**.")
-            if not factor_sel:
-                errors.append("Selecciona un **factor de riesgo**.")
-            if not delitos.strip():
-                errors.append("Indica los **delitos relacionados**.")
-            if lat_val is None or lng_val is None:
-                errors.append("Selecciona un **punto en el mapa** (lat/lng).")
-
-            if errors:
-                st.error("• " + "\n• ".join(errors))
+            errs = []
+            if not barrio.strip(): errs.append("Indica el **Barrio**.")
+            if not factor_sel: errs.append("Selecciona un **factor de riesgo**.")
+            if not delitos.strip(): errs.append("Indica los **delitos relacionados**.")
+            if lat_val is None or lng_val is None: errs.append("Selecciona un **punto en el mapa**.")
+            if errs:
+                st.error("• " + "\n• ".join(errs))
             else:
                 payload = {
                     "date": datetime.now(TZ).strftime("%d-%m-%Y"),
                     "barrio": barrio.strip(),
-                    "factores": factor_sel,  # guardamos como string (no CSV)
+                    "factores": factor_sel,
                     "delitos_relacionados": delitos.strip(),
                     "ligado_estructura": ligado,
                     "nombre_estructura": nombre_estructura.strip(),
@@ -265,12 +327,11 @@ with tabs[1]:
     if df.empty:
         st.info("Aún no hay registros.")
     else:
-        # ---------- FILTRO POR FACTOR ----------
-        st.markdown("**Filtro por factor de riesgo:**")
+        # Filtro por factor
         factores_unicos = [f for f in FACTORES if f in set(df["factores"].dropna().tolist())]
         filtro = st.selectbox("Mostrar solo factor", options=["(Todos)"] + factores_unicos, index=0)
 
-        # ---------- MAPA ----------
+        # Mapa
         m2 = folium.Map(location=[9.948, -84.144], zoom_start=13, control_scale=True)
         LocateControl(auto_start=False).add_to(m2)
         cluster = MarkerCluster().add_to(m2)
@@ -279,99 +340,39 @@ with tabs[1]:
         idx_global = 0
         for _, r in df.iterrows():
             lat, lng = r.get("lat"), r.get("lng")
-            if not (lat and lng):
-                continue
-
+            if not (lat and lng): continue
             factor = str(r.get("factores", "")).strip()
-            if filtro != "(Todos)" and factor != filtro:
-                continue
+            if filtro != "(Todos)" and factor != filtro: continue
 
             color = FACTOR_COLORS.get(factor, "#555555")
             jlat = float(lat) + _jitter(idx_global)
             jlng = float(lng) + _jitter(idx_global + 101)
 
             popup = folium.Popup(
-                html=(
-                    f"<b>Fecha:</b> {r.get('date','')}<br>"
-                    f"<b>Barrio:</b> {r.get('barrio','')}<br>"
-                    f"<b>Factor:</b> {factor}<br>"
-                    f"<b>Delitos:</b> {r.get('delitos_relacionados','')}<br>"
-                    f"<b>Estructura:</b> {r.get('ligado_estructura','')} "
-                    f"{r.get('nombre_estructura','')}<br>"
-                    f"<b>Obs:</b> {r.get('observaciones','')}"
-                ),
+                html=(f"<b>Fecha:</b> {r.get('date','')}<br>"
+                      f"<b>Barrio:</b> {r.get('barrio','')}<br>"
+                      f"<b>Factor:</b> {factor}<br>"
+                      f"<b>Delitos:</b> {r.get('delitos_relacionados','')}<br>"
+                      f"<b>Estructura:</b> {r.get('ligado_estructura','')} {r.get('nombre_estructura','')}<br>"
+                      f"<b>Obs:</b> {r.get('observaciones','')}"),
                 max_width=350,
             )
             folium.CircleMarker(
-                location=[jlat, jlng],
-                radius=8, color="#000", weight=1, fill=True,
-                fill_color=color, fill_opacity=0.95, popup=popup
+                location=[jlat, jlng], radius=8, color="#000", weight=1,
+                fill=True, fill_color=color, fill_opacity=0.95, popup=popup
             ).add_to(cluster)
             idx_global += 1
 
         st_folium(m2, height=540, use_container_width=True)
 
-        # ---------- TABLA ----------
+        # Tabla y descarga (sin lat/lng visibles)
+        show_df = df[["date","barrio","factores","delitos_relacionados","ligado_estructura",
+                      "nombre_estructura","observaciones","maps_link"]].copy()
         st.markdown("#### Tabla de respuestas")
-        st.dataframe(df, use_container_width=True)
-        st.download_button(
-            "⬇️ Descargar CSV",
-            data=df.to_csv(index=False).encode("utf-8"),
-            file_name="encuestas_pavas.csv",
-            mime="text/csv",
-        )
-
-        # ---------- ADMIN: ELIMINAR RESPUESTAS ----------
-        st.markdown("---")
-        st.markdown("### 🗑️ Eliminar respuestas (administración)")
-        ws = _open_worksheet()
-
-        # Construimos opciones de selección (índice de hoja: fila = idx+2)
-        opciones = []
-        for i, row in df.reset_index(drop=True).iterrows():
-            label = f"{i+2}: {row.get('date','')} | {row.get('barrio','')} | {row.get('factores','')[:60]}"
-            opciones.append(label)
-
-        col_del1, col_del2 = st.columns([0.65, 0.35])
-        with col_del1:
-            a_borrar = st.multiselect("Selecciona fila(s) para eliminar (se usa el número al inicio):", opciones)
-        with col_del2:
-            confirm = st.checkbox("Confirmo eliminar lo seleccionado")
-            if st.button("Eliminar seleccionadas"):
-                if not a_borrar:
-                    st.warning("No seleccionaste filas.")
-                elif not confirm:
-                    st.warning("Marca la casilla de confirmación.")
-                else:
-                    # Convertir etiquetas -> números de fila en la hoja
-                    filas = sorted([int(x.split(":")[0]) for x in a_borrar], reverse=True)
-                    try:
-                        for f in filas:
-                            ws.delete_rows(f)
-                        st.success(f"Eliminadas {len(filas)} fila(s). Actualiza la página para ver cambios.")
-                        st.cache_data.clear()
-                    except Exception as e:
-                        st.error(f"No se pudo eliminar: {e}")
-
-        col_clear1, col_clear2 = st.columns([0.65, 0.35])
-        with col_clear1:
-            st.caption("Esta acción borra **todas** las respuestas (deja solo los encabezados).")
-        with col_clear2:
-            confirm_all = st.checkbox("Confirmo vaciar toda la hoja")
-            if st.button("Vaciar todo"):
-                if not confirm_all:
-                    st.warning("Marca la casilla de confirmación.")
-                else:
-                    try:
-                        # Borra todas las filas de datos, preservando headers
-                        total = len(ws.get_all_values())
-                        if total > 1:
-                            ws.delete_rows(2, total)
-                        st.success("Hoja vaciada correctamente. Actualiza la página para ver cambios.")
-                        st.cache_data.clear()
-                    except Exception as e:
-                        st.error(f"No se pudo vaciar: {e}")
-
+        st.dataframe(show_df, use_container_width=True)
+        st.download_button("⬇️ Descargar CSV",
+            data=show_df.to_csv(index=False).encode("utf-8"),
+            file_name="encuestas_pavas.csv", mime="text/csv")
 
 
 
