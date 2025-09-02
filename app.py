@@ -9,10 +9,7 @@ from google.oauth2.service_account import Credentials
 
 import folium
 from streamlit_folium import st_folium
-from folium.plugins import MarkerCluster
-
-# Geolocalización desde el navegador
-from streamlit_geolocation import geolocation  # pip install streamlit-geolocation
+from folium.plugins import MarkerCluster, LocateControl
 
 st.set_page_config(page_title="Microdespliegue Pavas – Encuestas", layout="wide")
 
@@ -52,7 +49,7 @@ def _open_worksheet():
 
 def append_row(data: dict):
     ws = _open_worksheet()
-    # Fórmula HYPERLINK para Google Maps (se evalúa en Sheets)
+    # Fórmula HYPERLINK que se evalúa en Sheets
     maps_formula = f'=HYPERLINK("https://www.google.com/maps?q={data["lat"]},{data["lng"]}","Ver en Maps")'
     ws.append_row([
         data["date"], data["barrio"], data["factor_riesgo"],
@@ -78,32 +75,21 @@ with tabs[0]:
 
     with left:
         st.subheader("Selecciona un punto en el mapa")
+        st.caption("Usa el ícono 🎯 (Localizar) para centrar el mapa en tu ubicación y luego haz un clic para registrar el punto.")
 
-        # Intentar obtener ubicación del dispositivo
-        col_geo_a, col_geo_b = st.columns([0.55, 0.45])
-        with col_geo_a:
-            st.caption("Puedes usar tu ubicación actual para marcar más rápido el punto.")
-        with col_geo_b:
-            if st.button("📍 Usar mi ubicación"):
-                loc = geolocation()  # abre prompt del navegador
-                if loc and loc.get("lat") and loc.get("lng"):
-                    st.session_state["clicked"] = {
-                        "lat": round(float(loc["lat"]), 6),
-                        "lng": round(float(loc["lng"]), 6),
-                    }
-                else:
-                    st.warning("No se pudo obtener la ubicación (permiso denegado o no disponible).")
-
-        # Centro por defecto Pavas
+        # Centro por defecto (Pavas)
         default_center = [9.948, -84.144]
-        # Si hay punto seleccionado, centra allí; si no y se obtuvo geo, también
+
+        # Si ya hay punto elegido, centra allí
         center = default_center
         if st.session_state.get("clicked"):
             center = [st.session_state["clicked"]["lat"], st.session_state["clicked"]["lng"]]
 
+        # Mapa con control de geolocalización del navegador
         m = folium.Map(location=center, zoom_start=13, control_scale=True)
-        clicked_state = st.session_state.get("clicked", None)
+        LocateControl(auto_start=False, flyTo=True, keepCurrentZoomLevel=False).add_to(m)
 
+        clicked_state = st.session_state.get("clicked", None)
         if clicked_state:
             folium.Marker(
                 location=[clicked_state["lat"], clicked_state["lng"]],
@@ -186,6 +172,7 @@ with tabs[1]:
     else:
         # Mapa con todas las encuestas
         m2 = folium.Map(location=[9.948, -84.144], zoom_start=13, control_scale=True)
+        LocateControl(auto_start=False).add_to(m2)
         cluster = MarkerCluster().add_to(m2)
         for _, r in df.iterrows():
             lat, lng = r.get("lat"), r.get("lng")
@@ -213,6 +200,8 @@ with tabs[1]:
             file_name="encuestas_pavas.csv",
             mime="text/csv",
         )
+
+
 
 
 
