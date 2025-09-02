@@ -45,7 +45,7 @@ FACTORES = [
     "Otro: especificar.",
 ]
 
-# --- Colores por factor (22 colores) ---
+# Colores por factor (22)
 FACTOR_COLORS = {
     FACTORES[0]:  "#e41a1c",  FACTORES[1]:  "#377eb8",  FACTORES[2]:  "#4daf4a",
     FACTORES[3]:  "#984ea3",  FACTORES[4]:  "#ff7f00",  FACTORES[5]:  "#ffff33",
@@ -57,7 +57,8 @@ FACTOR_COLORS = {
     FACTORES[21]: "#b15928",
 }
 
-HEADERS = [
+# Cabecera "nueva" recomendada
+NEW_HEADERS = [
     "date", "barrio", "factores", "delitos_relacionados",
     "ligado_estructura", "nombre_estructura", "observaciones",
     "lat", "lng", "maps_link"
@@ -79,26 +80,90 @@ def _open_worksheet():
         ws = sh.worksheet(WORKSHEET_NAME)
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title=WORKSHEET_NAME, rows=1000, cols=20)
-        ws.append_row(HEADERS)
+        ws.append_row(NEW_HEADERS)
+    # Si la hoja existe pero sin headers, los agregamos
     if not ws.row_values(1):
-        ws.append_row(HEADERS)
+        ws.append_row(NEW_HEADERS)
     return ws
 
+def _current_headers(ws) -> list:
+    """Lee los encabezados reales de la hoja."""
+    headers = ws.row_values(1)
+    return [h.strip() for h in headers]
+
 def append_row(data: dict):
+    """
+    Agrega una fila respetando el ORDEN de las columnas que ya existen en la hoja.
+    Soporta ambos esquemas:
+      - viejo: timestamp, factor_riesgo, ...
+      - nuevo: date, factores, ...
+    """
     ws = _open_worksheet()
-    maps_formula = f'=HYPERLINK("https://www.google.com/maps?q={data["lat"]},{data["lng"]}","Ver en Maps")'
-    ws.append_row([
-        data["date"], data["barrio"], data["factores"],
-        data["delitos_relacionados"], data["ligado_estructura"],
-        data["nombre_estructura"], data["observaciones"],
-        data["lat"], data["lng"], maps_formula
-    ], value_input_option="USER_ENTERED")
+    headers = _current_headers(ws)
+
+    # Valores base (en "nuevo" esquema)
+    values_new = {
+        "date": data.get("date", ""),
+        "barrio": data.get("barrio", ""),
+        "factores": data.get("factores", ""),  # CSV de factores
+        "delitos_relacionados": data.get("delitos_relacionados", ""),
+        "ligado_estructura": data.get("ligado_estructura", ""),
+        "nombre_estructura": data.get("nombre_estructura", ""),
+        "observaciones": data.get("observaciones", ""),
+        "lat": data.get("lat", ""),
+        "lng": data.get("lng", ""),
+        "maps_link": f'=HYPERLINK("https://www.google.com/maps?q={data.get("lat")},{data.get("lng")}","Ver en Maps")',
+        # Compat con viejo
+        "timestamp": data.get("date", ""),                     # si la hoja tiene "timestamp"
+        "factor_riesgo": data.get("factores", ""),            # si la hoja tiene "factor_riesgo"
+    }
+
+    # Construimos la fila en el orden que tenga la hoja actualmente
+    row = [values_new.get(col, "") for col in headers]
+    ws.append_row(row, value_input_option="USER_ENTERED")
 
 @st.cache_data(ttl=30, show_spinner=False)
 def read_all_rows() -> pd.DataFrame:
+    """
+    Lee la hoja, devuelve SIEMPRE un DataFrame normalizado con:
+    date, barrio, factores, delitos_relacionados, ligado_estructura,
+    nombre_estructura, observaciones, lat, lng, maps_link
+    """
     ws = _open_worksheet()
-    rows = ws.get_all_records()
-    return pd.DataFrame(rows)
+    headers = _current_headers(ws)
+    rows = ws.get_all_records()  # dicts según encabezados reales
+    df_raw = pd.DataFrame(rows)
+
+    # Normalización de nombres
+    df = pd.DataFrame()
+    # Fecha: admite "date" (nuevo) o "timestamp" (viejo)
+    if "date" in df_raw.columns:
+        df["date"] = df_raw["date"]
+    elif "timestamp" in df_raw.columns:
+        # Si viniera con hora, la dejamos como está; idealmente ya es DD-MM-YYYY
+        df["date"] = df_raw["timestamp"]
+    else:
+        df["date"] = ""
+
+    df["barrio"] = df_raw["barrio"] if "barrio" in df_raw.columns else ""
+
+    # Factores múltiples (nuevo) o único (viejo)
+    if "factores" in df_raw.columns:
+        df["factores"] = df_raw["factores"]
+    elif "factor_riesgo" in df_raw.columns:
+        df["factores"] = df_raw["factor_riesgo"]
+    else:
+        df["factores"] = ""
+
+    df["delitos_relacionados"] = df_raw["delitos_relacionados"] if "delitos_relacionados" in df_raw.columns else ""
+    df["ligado_estructura"] = df_raw["ligado_estructura"] if "ligado_estructura" in df_raw.columns else ""
+    df["nombre_estructura"] = df_raw["nombre_estructura"] if "nombre_estructura" in df_raw.columns else ""
+    df["observaciones"] = df_raw["observaciones"] if "observaciones" in df_raw.columns else ""
+    df["lat"] = df_raw["lat"] if "lat" in df_raw.columns else ""
+    df["lng"] = df_raw["lng"] if "lng" in df_raw.columns else ""
+    df["maps_link"] = df_raw["maps_link"] if "maps_link" in df_raw.columns else ""
+
+    return df
 
 # ========= UTILS =========
 def _jitter(idx: int, base: float = 0.00008) -> float:
@@ -171,7 +236,7 @@ with tabs[0]:
         with st.form("form_encuesta", clear_on_submit=True):
             barrio = st.text_input("Barrio *")
 
-            # 🔹 AHORA: selección múltiple de factores (del catálogo)
+            # 🔹 Selección múltiple de factores (catálogo)
             factores_sel = st.multiselect(
                 "Factor(es) de riesgo *",
                 options=FACTORES,
@@ -204,8 +269,7 @@ with tabs[0]:
                 payload = {
                     "date": datetime.now(TZ).strftime("%d-%m-%Y"),
                     "barrio": barrio.strip(),
-                    # Guardamos como CSV legible
-                    "factores": ", ".join(factores_sel),
+                    "factores": ", ".join(factores_sel),  # CSV
                     "delitos_relacionados": delitos.strip(),
                     "ligado_estructura": ligado,
                     "nombre_estructura": nombre_estructura.strip(),
@@ -231,12 +295,14 @@ with tabs[1]:
         # Filtros por Factor/es
         # =======================
         st.markdown("**Filtro por factor de riesgo:**")
+
+        # Construimos lista de factores presentes (soporta 'factores' o 'factor_riesgo')
         factores_unicos = []
-        for v in df["factores"].dropna().tolist():
+        for v in df["factores"].fillna("").tolist():
             for f in [x.strip() for x in str(v).split(",") if x.strip()]:
                 if f not in factores_unicos:
                     factores_unicos.append(f)
-        # Aseguramos orden según catálogo original
+        # Orden según catálogo original
         factores_unicos = [f for f in FACTORES if f in factores_unicos]
 
         filtros = st.multiselect(
@@ -254,12 +320,9 @@ with tabs[1]:
         cluster = MarkerCluster().add_to(m2)
 
         # Leyenda
-        legend = _legend_html()
-        folium.map.LayerControl().add_to(m2)
-        m2.get_root().html.add_child(folium.Element(legend))
+        m2.get_root().html.add_child(folium.Element(_legend_html()))
 
         # Renderizado con color por factor.
-        # Si un registro tiene varios factores y el filtro incluye varios, se dibuja una marca por factor (con jitter leve).
         idx_global = 0
         for _, r in df.iterrows():
             lat, lng = r.get("lat"), r.get("lng")
@@ -267,7 +330,6 @@ with tabs[1]:
                 continue
 
             factores_row = [x.strip() for x in str(r.get("factores", "")).split(",") if x.strip()]
-            # Si hay filtros, requerimos intersección
             if filtros:
                 factores_mostrar = [f for f in factores_row if f in filtros]
                 if not factores_mostrar:
@@ -275,10 +337,8 @@ with tabs[1]:
             else:
                 factores_mostrar = factores_row if factores_row else ["(Sin factor)"]
 
-            # Dibujar 1 marca por factor a mostrar
             for i, f in enumerate(factores_mostrar):
                 color = FACTOR_COLORS.get(f, "#555555")
-                # Jitter para que no queden exactamente sobre el mismo punto
                 jlat = float(lat) + _jitter(idx_global + i)
                 jlng = float(lng) + _jitter(idx_global + i + 101)
                 popup = folium.Popup(
@@ -313,6 +373,8 @@ with tabs[1]:
             file_name="encuestas_pavas.csv",
             mime="text/csv",
         )
+
+
 
 
 
