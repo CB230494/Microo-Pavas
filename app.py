@@ -11,12 +11,21 @@ import folium
 from streamlit_folium import st_folium
 from folium.plugins import MarkerCluster
 
+# Geolocalización desde el navegador
+from streamlit_geolocation import geolocation  # pip install streamlit-geolocation
+
 st.set_page_config(page_title="Microdespliegue Pavas – Encuestas", layout="wide")
 
 # ========= CONFIG =========
 SHEET_ID = "1VfejN3kOziB7jhwG4P3Q8Q9B_s0uJatg1kzwELMO0fU"
 WORKSHEET_NAME = "Respuestas"   # se crea si no existe
 TZ = ZoneInfo("America/Costa_Rica")
+
+HEADERS = [
+    "date", "barrio", "factor_riesgo", "delitos_relacionados",
+    "ligado_estructura", "nombre_estructura", "observaciones",
+    "lat", "lng", "maps_link"
+]
 
 # ========= GSPREAD HELPERS =========
 @st.cache_resource(show_spinner=False)
@@ -35,28 +44,22 @@ def _open_worksheet():
         ws = sh.worksheet(WORKSHEET_NAME)
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title=WORKSHEET_NAME, rows=1000, cols=20)
-        ws.append_row([
-            "timestamp", "barrio", "factor_riesgo", "delitos_relacionados",
-            "ligado_estructura", "nombre_estructura", "observaciones",
-            "lat", "lng"
-        ])
+        ws.append_row(HEADERS)
     first_row = ws.row_values(1)
     if not first_row:
-        ws.append_row([
-            "timestamp", "barrio", "factor_riesgo", "delitos_relacionados",
-            "ligado_estructura", "nombre_estructura", "observaciones",
-            "lat", "lng"
-        ])
+        ws.append_row(HEADERS)
     return ws
 
 def append_row(data: dict):
     ws = _open_worksheet()
+    # Fórmula HYPERLINK para Google Maps (se evalúa en Sheets)
+    maps_formula = f'=HYPERLINK("https://www.google.com/maps?q={data["lat"]},{data["lng"]}","Ver en Maps")'
     ws.append_row([
-        data["timestamp"], data["barrio"], data["factor_riesgo"],
+        data["date"], data["barrio"], data["factor_riesgo"],
         data["delitos_relacionados"], data["ligado_estructura"],
         data["nombre_estructura"], data["observaciones"],
-        data["lat"], data["lng"]
-    ])
+        data["lat"], data["lng"], maps_formula
+    ], value_input_option="USER_ENTERED")
 
 @st.cache_data(ttl=30, show_spinner=False)
 def read_all_rows() -> pd.DataFrame:
@@ -75,14 +78,32 @@ with tabs[0]:
 
     with left:
         st.subheader("Selecciona un punto en el mapa")
-        # Centro aproximado de Pavas, San José, CR
-        start_lat, start_lng, start_zoom = 9.948, -84.144, 13
 
-        # Mapa clicable
-        m = folium.Map(location=[start_lat, start_lng], zoom_start=start_zoom, control_scale=True)
+        # Intentar obtener ubicación del dispositivo
+        col_geo_a, col_geo_b = st.columns([0.55, 0.45])
+        with col_geo_a:
+            st.caption("Puedes usar tu ubicación actual para marcar más rápido el punto.")
+        with col_geo_b:
+            if st.button("📍 Usar mi ubicación"):
+                loc = geolocation()  # abre prompt del navegador
+                if loc and loc.get("lat") and loc.get("lng"):
+                    st.session_state["clicked"] = {
+                        "lat": round(float(loc["lat"]), 6),
+                        "lng": round(float(loc["lng"]), 6),
+                    }
+                else:
+                    st.warning("No se pudo obtener la ubicación (permiso denegado o no disponible).")
+
+        # Centro por defecto Pavas
+        default_center = [9.948, -84.144]
+        # Si hay punto seleccionado, centra allí; si no y se obtuvo geo, también
+        center = default_center
+        if st.session_state.get("clicked"):
+            center = [st.session_state["clicked"]["lat"], st.session_state["clicked"]["lng"]]
+
+        m = folium.Map(location=center, zoom_start=13, control_scale=True)
         clicked_state = st.session_state.get("clicked", None)
 
-        # Si ya se seleccionó, dibuja marcador
         if clicked_state:
             folium.Marker(
                 location=[clicked_state["lat"], clicked_state["lng"]],
@@ -91,7 +112,7 @@ with tabs[0]:
 
         map_ret = st_folium(m, height=520, use_container_width=True)
 
-        # Captura de click
+        # Captura de click en el mapa
         if map_ret and map_ret.get("last_clicked"):
             st.session_state["clicked"] = {
                 "lat": round(map_ret["last_clicked"]["lat"], 6),
@@ -116,7 +137,6 @@ with tabs[0]:
             delitos = st.text_area("Delitos relacionados al factor *", height=70,
                                    placeholder="Ej.: venta de droga, robos, hurtos, sicariato…")
 
-            # 🔹 Radio y campo SIEMPRE habilitado
             ligado = st.radio("Ligado a estructura criminal *", ["No", "Sí"], index=0, horizontal=True)
             nombre_estructura = st.text_input("Nombre de la estructura ligada (si aplica)")
 
@@ -140,11 +160,12 @@ with tabs[0]:
                 st.error("• " + "\n• ".join(errors))
             else:
                 payload = {
-                    "timestamp": datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S"),
+                    # Fecha sin hora
+                    "date": datetime.now(TZ).strftime("%d-%m-%Y"),
                     "barrio": barrio.strip(),
                     "factor_riesgo": factor.strip(),
                     "delitos_relacionados": delitos.strip(),
-                    "ligado_estructura": ligado,  # guarda "Sí" o "No" tal cual
+                    "ligado_estructura": ligado,  # "Sí" o "No"
                     "nombre_estructura": nombre_estructura.strip(),
                     "observaciones": observ.strip(),
                     "lat": lat_val,
@@ -163,39 +184,35 @@ with tabs[1]:
     if df.empty:
         st.info("Aún no hay registros.")
     else:
-        mid_top, mid_bottom = st.container(), st.container()
-        with mid_top:
-            m2 = folium.Map(location=[9.948, -84.144], zoom_start=13, control_scale=True)
-            cluster = MarkerCluster().add_to(m2)
-            for _, r in df.iterrows():
-                lat, lng = r.get("lat"), r.get("lng")
-                if lat and lng:
-                    popup = folium.Popup(
-                        html=(
-                            f"<b>Barrio:</b> {r.get('barrio','')}<br>"
-                            f"<b>Factor:</b> {r.get('factor_riesgo','')}<br>"
-                            f"<b>Delitos:</b> {r.get('delitos_relacionados','')}<br>"
-                            f"<b>Estructura:</b> {r.get('ligado_estructura','')} "
-                            f"{r.get('nombre_estructura','')}<br>"
-                            f"<b>Obs:</b> {r.get('observaciones','')}<br>"
-                            f"<b>Fecha:</b> {r.get('timestamp','')}"
-                        ),
-                        max_width=350,
-                    )
-                    folium.Marker(location=[float(lat), float(lng)], popup=popup).add_to(cluster)
-            st_folium(m2, height=520, use_container_width=True)
+        # Mapa con todas las encuestas
+        m2 = folium.Map(location=[9.948, -84.144], zoom_start=13, control_scale=True)
+        cluster = MarkerCluster().add_to(m2)
+        for _, r in df.iterrows():
+            lat, lng = r.get("lat"), r.get("lng")
+            if lat and lng:
+                popup = folium.Popup(
+                    html=(
+                        f"<b>Barrio:</b> {r.get('barrio','')}<br>"
+                        f"<b>Factor:</b> {r.get('factor_riesgo','')}<br>"
+                        f"<b>Delitos:</b> {r.get('delitos_relacionados','')}<br>"
+                        f"<b>Estructura:</b> {r.get('ligado_estructura','')} "
+                        f"{r.get('nombre_estructura','')}<br>"
+                        f"<b>Obs:</b> {r.get('observaciones','')}<br>"
+                        f"<b>Fecha:</b> {r.get('date','')}"
+                    ),
+                    max_width=350,
+                )
+                folium.Marker(location=[float(lat), float(lng)], popup=popup).add_to(cluster)
+        st_folium(m2, height=520, use_container_width=True)
 
-        with mid_bottom:
-            st.markdown("#### Tabla de respuestas")
-            st.dataframe(df, use_container_width=True)
-            st.download_button(
-                "⬇️ Descargar CSV",
-                data=df.to_csv(index=False).encode("utf-8"),
-                file_name="encuestas_pavas.csv",
-                mime="text/csv",
-            )
-
-
+        st.markdown("#### Tabla de respuestas")
+        st.dataframe(df, use_container_width=True)
+        st.download_button(
+            "⬇️ Descargar CSV",
+            data=df.to_csv(index=False).encode("utf-8"),
+            file_name="encuestas_pavas.csv",
+            mime="text/csv",
+        )
 
 
 
