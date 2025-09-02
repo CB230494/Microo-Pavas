@@ -4,6 +4,7 @@ import pandas as pd
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import random
+import textwrap
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -16,7 +17,7 @@ st.set_page_config(page_title="Microdespliegue Pavas – Encuestas", layout="wid
 
 # ========= CONFIG =========
 SHEET_ID = "1VfejN3kOziB7jhwG4P3Q8Q9B_s0uJatg1kzwELMO0fU"
-WORKSHEET_NAME = "Respuestas"   # se crea si no existe
+WORKSHEET_NAME = "Respuestas"
 TZ = ZoneInfo("America/Costa_Rica")
 
 # --- Catálogo de factores (orden fijo) ---
@@ -81,31 +82,21 @@ def _open_worksheet():
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title=WORKSHEET_NAME, rows=1000, cols=20)
         ws.append_row(NEW_HEADERS)
-    # Si la hoja existe pero sin headers, los agregamos
     if not ws.row_values(1):
         ws.append_row(NEW_HEADERS)
     return ws
 
 def _current_headers(ws) -> list:
-    """Lee los encabezados reales de la hoja."""
-    headers = ws.row_values(1)
-    return [h.strip() for h in headers]
+    return [h.strip() for h in ws.row_values(1)]
 
 def append_row(data: dict):
-    """
-    Agrega una fila respetando el ORDEN de las columnas que ya existen en la hoja.
-    Soporta ambos esquemas:
-      - viejo: timestamp, factor_riesgo, ...
-      - nuevo: date, factores, ...
-    """
     ws = _open_worksheet()
     headers = _current_headers(ws)
 
-    # Valores base (en "nuevo" esquema)
     values_new = {
         "date": data.get("date", ""),
         "barrio": data.get("barrio", ""),
-        "factores": data.get("factores", ""),  # CSV de factores
+        "factores": data.get("factores", ""),  # guardamos string (selección única)
         "delitos_relacionados": data.get("delitos_relacionados", ""),
         "ligado_estructura": data.get("ligado_estructura", ""),
         "nombre_estructura": data.get("nombre_estructura", ""),
@@ -113,41 +104,29 @@ def append_row(data: dict):
         "lat": data.get("lat", ""),
         "lng": data.get("lng", ""),
         "maps_link": f'=HYPERLINK("https://www.google.com/maps?q={data.get("lat")},{data.get("lng")}","Ver en Maps")',
-        # Compat con viejo
-        "timestamp": data.get("date", ""),                     # si la hoja tiene "timestamp"
-        "factor_riesgo": data.get("factores", ""),            # si la hoja tiene "factor_riesgo"
+        # compat antiguo:
+        "timestamp": data.get("date", ""),
+        "factor_riesgo": data.get("factores", ""),
     }
 
-    # Construimos la fila en el orden que tenga la hoja actualmente
     row = [values_new.get(col, "") for col in headers]
     ws.append_row(row, value_input_option="USER_ENTERED")
 
 @st.cache_data(ttl=30, show_spinner=False)
 def read_all_rows() -> pd.DataFrame:
-    """
-    Lee la hoja, devuelve SIEMPRE un DataFrame normalizado con:
-    date, barrio, factores, delitos_relacionados, ligado_estructura,
-    nombre_estructura, observaciones, lat, lng, maps_link
-    """
     ws = _open_worksheet()
-    headers = _current_headers(ws)
-    rows = ws.get_all_records()  # dicts según encabezados reales
+    rows = ws.get_all_records()
     df_raw = pd.DataFrame(rows)
 
-    # Normalización de nombres
     df = pd.DataFrame()
-    # Fecha: admite "date" (nuevo) o "timestamp" (viejo)
     if "date" in df_raw.columns:
         df["date"] = df_raw["date"]
     elif "timestamp" in df_raw.columns:
-        # Si viniera con hora, la dejamos como está; idealmente ya es DD-MM-YYYY
         df["date"] = df_raw["timestamp"]
     else:
         df["date"] = ""
 
     df["barrio"] = df_raw["barrio"] if "barrio" in df_raw.columns else ""
-
-    # Factores múltiples (nuevo) o único (viejo)
     if "factores" in df_raw.columns:
         df["factores"] = df_raw["factores"]
     elif "factor_riesgo" in df_raw.columns:
@@ -155,13 +134,8 @@ def read_all_rows() -> pd.DataFrame:
     else:
         df["factores"] = ""
 
-    df["delitos_relacionados"] = df_raw["delitos_relacionados"] if "delitos_relacionados" in df_raw.columns else ""
-    df["ligado_estructura"] = df_raw["ligado_estructura"] if "ligado_estructura" in df_raw.columns else ""
-    df["nombre_estructura"] = df_raw["nombre_estructura"] if "nombre_estructura" in df_raw.columns else ""
-    df["observaciones"] = df_raw["observaciones"] if "observaciones" in df_raw.columns else ""
-    df["lat"] = df_raw["lat"] if "lat" in df_raw.columns else ""
-    df["lng"] = df_raw["lng"] if "lng" in df_raw.columns else ""
-    df["maps_link"] = df_raw["maps_link"] if "maps_link" in df_raw.columns else ""
+    for c in ["delitos_relacionados","ligado_estructura","nombre_estructura","observaciones","lat","lng","maps_link"]:
+        df[c] = df_raw[c] if c in df_raw.columns else ""
 
     return df
 
@@ -172,22 +146,22 @@ def _jitter(idx: int, base: float = 0.00008) -> float:
 
 def _legend_html() -> str:
     items = "".join(
-        f'<div style="display:flex;align-items:center;margin-bottom:4px">'
-        f'<span style="width:12px;height:12px;background:{FACTOR_COLORS[f]};display:inline-block;margin-right:8px;border:1px solid #333;"></span>'
-        f'<span style="font-size:12px">{f}</span></div>'
+        f'<div style="display:flex;align-items:flex-start;margin-bottom:6px">'
+        f'<span style="width:12px;height:12px;background:{FACTOR_COLORS[f]};'
+        f'display:inline-block;margin-right:8px;border:1px solid #333;"></span>'
+        f'<span style="font-size:12px; color:#000; line-height:1.2;">{f}</span></div>'
         for f in FACTORES
     )
     return (
         '<div style="position: fixed; bottom: 20px; right: 20px; z-index:9999; '
-        'background: rgba(255,255,255,0.95); padding:10px; border:1px solid #999; '
-        'border-radius:6px; max-height:300px; overflow:auto; width:320px">'
-        '<b>Leyenda – Factores</b><hr style="margin:6px 0;">'
+        'background: rgba(255,255,255,0.98); padding:10px; border:1px solid #666; '
+        'border-radius:6px; max-height:320px; overflow:auto; width:340px; color:#000;">'
+        '<div style="font-weight:700; margin-bottom:6px; color:#000;">Leyenda – Factores</div>'
         f'{items}</div>'
     )
 
 # ========= UI =========
 st.title("📍 Microdespliegue Pavas – Encuestas georreferenciadas")
-
 tabs = st.tabs(["📝 Formulario", "🗺️ Mapa & Datos"])
 
 # ======= TAB 1: FORM =======
@@ -232,18 +206,18 @@ with tabs[0]:
 
     with right:
         st.subheader("Formulario de encuesta")
-
         with st.form("form_encuesta", clear_on_submit=True):
             barrio = st.text_input("Barrio *")
 
-            # 🔹 Selección múltiple de factores (catálogo)
-            factores_sel = st.multiselect(
-                "Factor(es) de riesgo *",
+            # 🔹 Selección ÚNICA (selectbox)
+            factor_sel = st.selectbox(
+                "Factor de riesgo *",
                 options=FACTORES,
-                placeholder="Selecciona uno o varios factores",
+                index=None,
+                placeholder="Selecciona un factor"
             )
 
-            delitos = st.text_area("Delitos relacionados al/los factor(es) *", height=70,
+            delitos = st.text_area("Delitos relacionados al factor *", height=70,
                                    placeholder="Ej.: venta de droga, robos, hurtos, sicariato…")
 
             ligado = st.radio("Ligado a estructura criminal *", ["No", "Sí"], index=0, horizontal=True)
@@ -256,8 +230,8 @@ with tabs[0]:
             errors = []
             if not barrio.strip():
                 errors.append("Indica el **Barrio**.")
-            if not factores_sel:
-                errors.append("Selecciona al menos **un factor de riesgo**.")
+            if not factor_sel:
+                errors.append("Selecciona un **factor de riesgo**.")
             if not delitos.strip():
                 errors.append("Indica los **delitos relacionados**.")
             if lat_val is None or lng_val is None:
@@ -269,7 +243,7 @@ with tabs[0]:
                 payload = {
                     "date": datetime.now(TZ).strftime("%d-%m-%Y"),
                     "barrio": barrio.strip(),
-                    "factores": ", ".join(factores_sel),  # CSV
+                    "factores": factor_sel,  # guardamos como string (no CSV)
                     "delitos_relacionados": delitos.strip(),
                     "ligado_estructura": ligado,
                     "nombre_estructura": nombre_estructura.strip(),
@@ -285,86 +259,59 @@ with tabs[0]:
 
 # ======= TAB 2: MAPA & DATOS =======
 with tabs[1]:
-    st.subheader("Visualización de encuestas")
+    st.subheader("Mapa interactivo + Tabla y administración")
 
     df = read_all_rows()
     if df.empty:
         st.info("Aún no hay registros.")
     else:
-        # =======================
-        # Filtros por Factor/es
-        # =======================
+        # ---------- FILTRO POR FACTOR ----------
         st.markdown("**Filtro por factor de riesgo:**")
+        factores_unicos = [f for f in FACTORES if f in set(df["factores"].dropna().tolist())]
+        filtro = st.selectbox("Mostrar solo factor", options=["(Todos)"] + factores_unicos, index=0)
 
-        # Construimos lista de factores presentes (soporta 'factores' o 'factor_riesgo')
-        factores_unicos = []
-        for v in df["factores"].fillna("").tolist():
-            for f in [x.strip() for x in str(v).split(",") if x.strip()]:
-                if f not in factores_unicos:
-                    factores_unicos.append(f)
-        # Orden según catálogo original
-        factores_unicos = [f for f in FACTORES if f in factores_unicos]
-
-        filtros = st.multiselect(
-            "Mostrar únicamente registros que contengan cualquiera de estos factores",
-            options=factores_unicos,
-            default=[],
-            placeholder="(Sin filtro = muestra todos)"
-        )
-
-        # =======================
-        # Mapa
-        # =======================
+        # ---------- MAPA ----------
         m2 = folium.Map(location=[9.948, -84.144], zoom_start=13, control_scale=True)
         LocateControl(auto_start=False).add_to(m2)
         cluster = MarkerCluster().add_to(m2)
-
-        # Leyenda
         m2.get_root().html.add_child(folium.Element(_legend_html()))
 
-        # Renderizado con color por factor.
         idx_global = 0
         for _, r in df.iterrows():
             lat, lng = r.get("lat"), r.get("lng")
             if not (lat and lng):
                 continue
 
-            factores_row = [x.strip() for x in str(r.get("factores", "")).split(",") if x.strip()]
-            if filtros:
-                factores_mostrar = [f for f in factores_row if f in filtros]
-                if not factores_mostrar:
-                    continue
-            else:
-                factores_mostrar = factores_row if factores_row else ["(Sin factor)"]
+            factor = str(r.get("factores", "")).strip()
+            if filtro != "(Todos)" and factor != filtro:
+                continue
 
-            for i, f in enumerate(factores_mostrar):
-                color = FACTOR_COLORS.get(f, "#555555")
-                jlat = float(lat) + _jitter(idx_global + i)
-                jlng = float(lng) + _jitter(idx_global + i + 101)
-                popup = folium.Popup(
-                    html=(
-                        f"<b>Fecha:</b> {r.get('date','')}<br>"
-                        f"<b>Barrio:</b> {r.get('barrio','')}<br>"
-                        f"<b>Factor:</b> {f}<br>"
-                        f"<b>Delitos:</b> {r.get('delitos_relacionados','')}<br>"
-                        f"<b>Estructura:</b> {r.get('ligado_estructura','')} "
-                        f"{r.get('nombre_estructura','')}<br>"
-                        f"<b>Obs:</b> {r.get('observaciones','')}"
-                    ),
-                    max_width=350,
-                )
-                folium.CircleMarker(
-                    location=[jlat, jlng],
-                    radius=8, color="#000", weight=1, fill=True,
-                    fill_color=color, fill_opacity=0.95, popup=popup
-                ).add_to(cluster)
+            color = FACTOR_COLORS.get(factor, "#555555")
+            jlat = float(lat) + _jitter(idx_global)
+            jlng = float(lng) + _jitter(idx_global + 101)
+
+            popup = folium.Popup(
+                html=(
+                    f"<b>Fecha:</b> {r.get('date','')}<br>"
+                    f"<b>Barrio:</b> {r.get('barrio','')}<br>"
+                    f"<b>Factor:</b> {factor}<br>"
+                    f"<b>Delitos:</b> {r.get('delitos_relacionados','')}<br>"
+                    f"<b>Estructura:</b> {r.get('ligado_estructura','')} "
+                    f"{r.get('nombre_estructura','')}<br>"
+                    f"<b>Obs:</b> {r.get('observaciones','')}"
+                ),
+                max_width=350,
+            )
+            folium.CircleMarker(
+                location=[jlat, jlng],
+                radius=8, color="#000", weight=1, fill=True,
+                fill_color=color, fill_opacity=0.95, popup=popup
+            ).add_to(cluster)
             idx_global += 1
 
         st_folium(m2, height=540, use_container_width=True)
 
-        # =======================
-        # Tabla + descarga
-        # =======================
+        # ---------- TABLA ----------
         st.markdown("#### Tabla de respuestas")
         st.dataframe(df, use_container_width=True)
         st.download_button(
@@ -373,6 +320,58 @@ with tabs[1]:
             file_name="encuestas_pavas.csv",
             mime="text/csv",
         )
+
+        # ---------- ADMIN: ELIMINAR RESPUESTAS ----------
+        st.markdown("---")
+        st.markdown("### 🗑️ Eliminar respuestas (administración)")
+        ws = _open_worksheet()
+
+        # Construimos opciones de selección (índice de hoja: fila = idx+2)
+        opciones = []
+        for i, row in df.reset_index(drop=True).iterrows():
+            label = f"{i+2}: {row.get('date','')} | {row.get('barrio','')} | {row.get('factores','')[:60]}"
+            opciones.append(label)
+
+        col_del1, col_del2 = st.columns([0.65, 0.35])
+        with col_del1:
+            a_borrar = st.multiselect("Selecciona fila(s) para eliminar (se usa el número al inicio):", opciones)
+        with col_del2:
+            confirm = st.checkbox("Confirmo eliminar lo seleccionado")
+            if st.button("Eliminar seleccionadas"):
+                if not a_borrar:
+                    st.warning("No seleccionaste filas.")
+                elif not confirm:
+                    st.warning("Marca la casilla de confirmación.")
+                else:
+                    # Convertir etiquetas -> números de fila en la hoja
+                    filas = sorted([int(x.split(":")[0]) for x in a_borrar], reverse=True)
+                    try:
+                        for f in filas:
+                            ws.delete_rows(f)
+                        st.success(f"Eliminadas {len(filas)} fila(s). Actualiza la página para ver cambios.")
+                        st.cache_data.clear()
+                    except Exception as e:
+                        st.error(f"No se pudo eliminar: {e}")
+
+        col_clear1, col_clear2 = st.columns([0.65, 0.35])
+        with col_clear1:
+            st.caption("Esta acción borra **todas** las respuestas (deja solo los encabezados).")
+        with col_clear2:
+            confirm_all = st.checkbox("Confirmo vaciar toda la hoja")
+            if st.button("Vaciar todo"):
+                if not confirm_all:
+                    st.warning("Marca la casilla de confirmación.")
+                else:
+                    try:
+                        # Borra todas las filas de datos, preservando headers
+                        total = len(ws.get_all_values())
+                        if total > 1:
+                            ws.delete_rows(2, total)
+                        st.success("Hoja vaciada correctamente. Actualiza la página para ver cambios.")
+                        st.cache_data.clear()
+                    except Exception as e:
+                        st.error(f"No se pudo vaciar: {e}")
+
 
 
 
