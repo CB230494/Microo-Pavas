@@ -27,7 +27,6 @@ HEADERS = [
 # ========= GSPREAD HELPERS =========
 @st.cache_resource(show_spinner=False)
 def _open_worksheet():
-    """Abre (o crea) la hoja 'Respuestas' con encabezados."""
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
@@ -42,14 +41,12 @@ def _open_worksheet():
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title=WORKSHEET_NAME, rows=1000, cols=20)
         ws.append_row(HEADERS)
-    first_row = ws.row_values(1)
-    if not first_row:
+    if not ws.row_values(1):
         ws.append_row(HEADERS)
     return ws
 
 def append_row(data: dict):
     ws = _open_worksheet()
-    # Fórmula HYPERLINK que se evalúa en Sheets
     maps_formula = f'=HYPERLINK("https://www.google.com/maps?q={data["lat"]},{data["lng"]}","Ver en Maps")'
     ws.append_row([
         data["date"], data["barrio"], data["factor_riesgo"],
@@ -75,43 +72,40 @@ with tabs[0]:
 
     with left:
         st.subheader("Selecciona un punto en el mapa")
-        st.caption("Usa el ícono 🎯 (Localizar) para centrar el mapa en tu ubicación y luego haz un clic para registrar el punto.")
+        st.caption("Usa el ícono 🎯 (Localizar) para centrar el mapa en tu ubicación; luego haz un clic para registrar el punto.")
 
-        # Centro por defecto (Pavas)
         default_center = [9.948, -84.144]
 
-        # Si ya hay punto elegido, centra allí
-        center = default_center
-        if st.session_state.get("clicked"):
-            center = [st.session_state["clicked"]["lat"], st.session_state["clicked"]["lng"]]
+        # Centro: si ya hay punto elegido, usa ese
+        clicked = st.session_state.get("clicked") or {}
+        center = [clicked.get("lat", default_center[0]), clicked.get("lng", default_center[1])]
 
-        # Mapa con control de geolocalización del navegador
         m = folium.Map(location=center, zoom_start=13, control_scale=True)
-        LocateControl(auto_start=False, flyTo=True, keepCurrentZoomLevel=False).add_to(m)
+        LocateControl(auto_start=False, flyTo=True).add_to(m)
 
-        clicked_state = st.session_state.get("clicked", None)
-        if clicked_state:
+        if clicked.get("lat") is not None and clicked.get("lng") is not None:
             folium.Marker(
-                location=[clicked_state["lat"], clicked_state["lng"]],
+                location=[clicked["lat"], clicked["lng"]],
                 tooltip="Ubicación seleccionada"
             ).add_to(m)
 
         map_ret = st_folium(m, height=520, use_container_width=True)
 
-        # Captura de click en el mapa
+        # Captura de click
         if map_ret and map_ret.get("last_clicked"):
             st.session_state["clicked"] = {
                 "lat": round(map_ret["last_clicked"]["lat"], 6),
                 "lng": round(map_ret["last_clicked"]["lng"], 6),
             }
+            clicked = st.session_state["clicked"]  # refrescar ref local
 
         cols_coords = st.columns(3)
-        lat_val = st.session_state.get("clicked", {}).get("lat")
-        lng_val = st.session_state.get("clicked", {}).get("lng")
+        lat_val = clicked.get("lat")
+        lng_val = clicked.get("lng")
         cols_coords[0].metric("Latitud", lat_val if lat_val is not None else "—")
         cols_coords[1].metric("Longitud", lng_val if lng_val is not None else "—")
         if cols_coords[2].button("Limpiar selección"):
-            st.session_state["clicked"] = None
+            st.session_state.pop("clicked", None)  # <-- evita dejar None
             st.rerun()
 
     with right:
@@ -131,7 +125,6 @@ with tabs[0]:
             submitted = st.form_submit_button("Guardar en Google Sheets")
 
         if submitted:
-            # Validaciones mínimas
             errors = []
             if not barrio.strip():
                 errors.append("Indica el **Barrio**.")
@@ -146,12 +139,11 @@ with tabs[0]:
                 st.error("• " + "\n• ".join(errors))
             else:
                 payload = {
-                    # Fecha sin hora
-                    "date": datetime.now(TZ).strftime("%d-%m-%Y"),
+                    "date": datetime.now(TZ).strftime("%d-%m-%Y"),  # fecha sin hora
                     "barrio": barrio.strip(),
                     "factor_riesgo": factor.strip(),
                     "delitos_relacionados": delitos.strip(),
-                    "ligado_estructura": ligado,  # "Sí" o "No"
+                    "ligado_estructura": ligado,
                     "nombre_estructura": nombre_estructura.strip(),
                     "observaciones": observ.strip(),
                     "lat": lat_val,
@@ -170,7 +162,6 @@ with tabs[1]:
     if df.empty:
         st.info("Aún no hay registros.")
     else:
-        # Mapa con todas las encuestas
         m2 = folium.Map(location=[9.948, -84.144], zoom_start=13, control_scale=True)
         LocateControl(auto_start=False).add_to(m2)
         cluster = MarkerCluster().add_to(m2)
@@ -200,12 +191,6 @@ with tabs[1]:
             file_name="encuestas_pavas.csv",
             mime="text/csv",
         )
-
-
-
-
-
-
 
 
 
