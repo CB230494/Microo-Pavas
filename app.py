@@ -75,11 +75,14 @@ with tabs[0]:
 
     with left:
         st.subheader("Selecciona un punto en el mapa")
+        # Centro aproximado de Pavas, San José, CR
         start_lat, start_lng, start_zoom = 9.948, -84.144, 13
 
+        # Mapa clicable
         m = folium.Map(location=[start_lat, start_lng], zoom_start=start_zoom, control_scale=True)
         clicked_state = st.session_state.get("clicked", None)
 
+        # Si ya se seleccionó, dibuja marcador
         if clicked_state:
             folium.Marker(
                 location=[clicked_state["lat"], clicked_state["lng"]],
@@ -88,6 +91,7 @@ with tabs[0]:
 
         map_ret = st_folium(m, height=520, use_container_width=True)
 
+        # Captura de click
         if map_ret and map_ret.get("last_clicked"):
             st.session_state["clicked"] = {
                 "lat": round(map_ret["last_clicked"]["lat"], 6),
@@ -112,20 +116,16 @@ with tabs[0]:
             delitos = st.text_area("Delitos relacionados al factor *", height=70,
                                    placeholder="Ej.: venta de droga, robos, hurtos, sicariato…")
 
-            # 🔹 Aquí va la corrección
+            # 🔹 Radio y campo SIEMPRE habilitado
             ligado = st.radio("Ligado a estructura criminal *", ["No", "Sí"], index=0, horizontal=True)
-            ligado_norm = ligado.strip().lower()
-
-            nombre_estructura = st.text_input(
-                "Nombre de la estructura ligada (si aplica)",
-                disabled=(ligado_norm != "sí")
-            )
+            nombre_estructura = st.text_input("Nombre de la estructura ligada (si aplica)")
 
             observ = st.text_area("Observaciones", height=90)
 
             submitted = st.form_submit_button("Guardar en Google Sheets")
 
         if submitted:
+            # Validaciones mínimas
             errors = []
             if not barrio.strip():
                 errors.append("Indica el **Barrio**.")
@@ -135,8 +135,6 @@ with tabs[0]:
                 errors.append("Indica los **delitos relacionados**.")
             if lat_val is None or lng_val is None:
                 errors.append("Selecciona un **punto en el mapa** (lat/lng).")
-            if ligado_norm == "sí" and not nombre_estructura.strip():
-                errors.append("Debes indicar el **nombre de la estructura** si elegiste 'Sí'.")
 
             if errors:
                 st.error("• " + "\n• ".join(errors))
@@ -146,8 +144,8 @@ with tabs[0]:
                     "barrio": barrio.strip(),
                     "factor_riesgo": factor.strip(),
                     "delitos_relacionados": delitos.strip(),
-                    "ligado_estructura": "Sí" if ligado_norm == "sí" else "No",
-                    "nombre_estructura": nombre_estructura.strip() if ligado_norm == "sí" else "",
+                    "ligado_estructura": ligado,  # guarda "Sí" o "No" tal cual
+                    "nombre_estructura": nombre_estructura.strip(),
                     "observaciones": observ.strip(),
                     "lat": lat_val,
                     "lng": lng_val,
