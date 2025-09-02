@@ -55,7 +55,7 @@ FACTOR_COLORS = {
     FACTORES[21]:"#b15928",
 }
 
-# Cabecera recomendada en la hoja (sin lat/lng)
+# Cabecera recomendada (sin lat/lng)
 NEW_HEADERS = [
     "date","barrio","factores","delitos_relacionados",
     "ligado_estructura","nombre_estructura","observaciones",
@@ -98,9 +98,9 @@ def _ensure_schema(ws):
 def append_row(data: dict):
     """
     Guarda fila siguiendo el orden actual de la hoja.
-    - maps_link como URL (NO fórmula), para que podamos leer lat/lng luego.
-    - Colorea la celda del factor con su color.
-    - Retro-compatibilidad con columnas antiguas (timestamp, factor_riesgo).
+    - maps_link como URL (no fórmula), para leer lat/lng después.
+    - Colorea la celda del factor.
+    - Retro-compat con 'timestamp' y 'factor_riesgo' si existieran.
     """
     ws = _ws()
     headers = _headers(ws)
@@ -123,7 +123,7 @@ def append_row(data: dict):
     ws.append_row([values.get(c,"") for c in headers], value_input_option="USER_ENTERED")
     last_row = len(ws.get_all_values())
 
-    # Pintar la celda del factor
+    # Pintar celda del factor
     col = None
     if "factores" in headers: col = headers.index("factores")+1
     elif "factor_riesgo" in headers: col = headers.index("factor_riesgo")+1
@@ -134,14 +134,15 @@ def append_row(data: dict):
 @st.cache_data(ttl=30, show_spinner=False)
 def read_df() -> pd.DataFrame:
     """
-    Devuelve DF normalizado. Si maps_link es texto (“Ver en Maps”), leo la fórmula real
-    para extraer la URL; si ya es URL, la uso directa. Reconstruyo lat/lng.
+    Devuelve DF normalizado. Reconstruye lat/lng desde maps_link:
+    - Si es URL directa: la parsea.
+    - Si es texto 'Ver en Maps': lee la fórmula HYPERLINK y extrae la URL.
     """
     ws = _ws()
     records = ws.get_all_records()
     df_raw = pd.DataFrame(records)
 
-    # Además, obtengo TODAS las celdas con value_render_option='FORMULA' para ver fórmulas HYPERLINK
+    # leer fórmulas para casos 'Ver en Maps'
     all_formulas = ws.get_all_values(value_render_option="FORMULA")
     headers = all_formulas[0] if all_formulas else []
     maps_col_idx = headers.index("maps_link") if "maps_link" in headers else None
@@ -151,7 +152,6 @@ def read_df() -> pd.DataFrame:
             maps_formulas.append(row[maps_col_idx] if maps_col_idx < len(row) else "")
 
     df = pd.DataFrame()
-
     # columnas bases
     if "date" in df_raw.columns: df["date"] = df_raw["date"]
     elif "timestamp" in df_raw.columns: df["date"] = df_raw["timestamp"]
@@ -162,20 +162,16 @@ def read_df() -> pd.DataFrame:
     else: df["factores"] = ""
     for c in ["delitos_relacionados","ligado_estructura","nombre_estructura","observaciones"]:
         df[c] = df_raw[c] if c in df_raw.columns else ""
-
-    # maps_link visible
     df["maps_link"] = df_raw["maps_link"] if "maps_link" in df_raw.columns else ""
 
-    # Extraer lat/lng:
+    # Extraer lat/lng
     lats, lngs = [], []
     url_pat = re.compile(r"https?://.*maps\?q=(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)")
     hyp_pat = re.compile(r'HYPERLINK\("https?://.*maps\?q=(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)"')
     for i, link in enumerate(df["maps_link"].fillna("")):
-        # 1) si ya es URL:
         m = url_pat.search(str(link))
         if m:
             lats.append(float(m.group(1))); lngs.append(float(m.group(2))); continue
-        # 2) si es texto “Ver en Maps”, buscamos fórmula real de esa fila
         formula = maps_formulas[i] if i < len(maps_formulas) else ""
         m2 = url_pat.search(formula) or hyp_pat.search(formula)
         if m2:
@@ -183,6 +179,10 @@ def read_df() -> pd.DataFrame:
         else:
             lats.append(None); lngs.append(None)
     df["lat"], df["lng"] = lats, lngs
+
+    # NORMALIZAR: números y NaN coherentes (evita error Folium)
+    df["lat"] = pd.to_numeric(df["lat"], errors="coerce")
+    df["lng"] = pd.to_numeric(df["lng"], errors="coerce")
 
     return df
 
@@ -296,11 +296,16 @@ with tabs[1]:
         m2.get_root().html.add_child(folium.Element(_legend_html()))
 
         idx = 0
+        omitidos = 0
         for _, r in df.iterrows():
             lat, lng = r.get("lat"), r.get("lng")
-            if lat is None or lng is None: continue
+            # Evitar NaNs/None
+            if lat is None or lng is None or pd.isna(lat) or pd.isna(lng):
+                omitidos += 1
+                continue
             factor = str(r.get("factores","")).strip()
-            if filtro != "(Todos)" and factor != filtro: continue
+            if filtro != "(Todos)" and factor != filtro:
+                continue
             color = FACTOR_COLORS.get(factor, "#555555")
             jlat = float(lat) + _jitter(idx); jlng = float(lng) + _jitter(idx+101)
             popup = folium.Popup(
@@ -318,6 +323,8 @@ with tabs[1]:
             idx += 1
 
         st_folium(m2, height=540, use_container_width=True)
+        if omitidos:
+            st.caption(f"({omitidos} registro(s) omitidos por coordenadas inválidas)")
 
         # Tabla (sin lat/lng visibles)
         show_df = df[["date","barrio","factores","delitos_relacionados",
@@ -367,6 +374,7 @@ with tabs[1]:
                         st.cache_data.clear()
                     except Exception as e:
                         st.error(f"No se pudo vaciar: {e}")
+
 
 
 
