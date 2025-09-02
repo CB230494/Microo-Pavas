@@ -22,7 +22,6 @@ TZ = ZoneInfo("America/Costa_Rica")
 @st.cache_resource(show_spinner=False)
 def _open_worksheet():
     """Abre (o crea) la hoja 'Respuestas' con encabezados."""
-    # Las credenciales deben estar en st.secrets["gcp_service_account"]
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
@@ -41,7 +40,6 @@ def _open_worksheet():
             "ligado_estructura", "nombre_estructura", "observaciones",
             "lat", "lng"
         ])
-    # Si la hoja existe pero no tiene headers, los aseguramos
     first_row = ws.row_values(1)
     if not first_row:
         ws.append_row([
@@ -77,14 +75,11 @@ with tabs[0]:
 
     with left:
         st.subheader("Selecciona un punto en el mapa")
-        # Centro aproximado de Pavas, San José, CR
         start_lat, start_lng, start_zoom = 9.948, -84.144, 13
 
-        # Mapa clicable
         m = folium.Map(location=[start_lat, start_lng], zoom_start=start_zoom, control_scale=True)
         clicked_state = st.session_state.get("clicked", None)
 
-        # Si ya se seleccionó, dibuja marcador
         if clicked_state:
             folium.Marker(
                 location=[clicked_state["lat"], clicked_state["lng"]],
@@ -93,7 +88,6 @@ with tabs[0]:
 
         map_ret = st_folium(m, height=520, use_container_width=True)
 
-        # Captura de click
         if map_ret and map_ret.get("last_clicked"):
             st.session_state["clicked"] = {
                 "lat": round(map_ret["last_clicked"]["lat"], 6),
@@ -117,15 +111,21 @@ with tabs[0]:
                                   placeholder="Ej.: consumo de drogas, portación de armas, ventas ilícitas, etc.")
             delitos = st.text_area("Delitos relacionados al factor *", height=70,
                                    placeholder="Ej.: venta de droga, robos, hurtos, sicariato…")
+
+            # 🔹 Aquí va la corrección
             ligado = st.radio("Ligado a estructura criminal *", ["No", "Sí"], index=0, horizontal=True)
-            nombre_estructura = st.text_input("Nombre de la estructura ligada (si aplica)",
-                                              disabled=(ligado == "No"))
+            ligado_norm = ligado.strip().lower()
+
+            nombre_estructura = st.text_input(
+                "Nombre de la estructura ligada (si aplica)",
+                disabled=(ligado_norm != "sí")
+            )
+
             observ = st.text_area("Observaciones", height=90)
 
             submitted = st.form_submit_button("Guardar en Google Sheets")
 
         if submitted:
-            # Validaciones
             errors = []
             if not barrio.strip():
                 errors.append("Indica el **Barrio**.")
@@ -135,6 +135,8 @@ with tabs[0]:
                 errors.append("Indica los **delitos relacionados**.")
             if lat_val is None or lng_val is None:
                 errors.append("Selecciona un **punto en el mapa** (lat/lng).")
+            if ligado_norm == "sí" and not nombre_estructura.strip():
+                errors.append("Debes indicar el **nombre de la estructura** si elegiste 'Sí'.")
 
             if errors:
                 st.error("• " + "\n• ".join(errors))
@@ -144,8 +146,8 @@ with tabs[0]:
                     "barrio": barrio.strip(),
                     "factor_riesgo": factor.strip(),
                     "delitos_relacionados": delitos.strip(),
-                    "ligado_estructura": "Sí" if ligado == "Sí" else "No",
-                    "nombre_estructura": nombre_estructura.strip() if ligado == "Sí" else "",
+                    "ligado_estructura": "Sí" if ligado_norm == "sí" else "No",
+                    "nombre_estructura": nombre_estructura.strip() if ligado_norm == "sí" else "",
                     "observaciones": observ.strip(),
                     "lat": lat_val,
                     "lng": lng_val,
@@ -153,8 +155,6 @@ with tabs[0]:
                 try:
                     append_row(payload)
                     st.success("✅ Respuesta guardada correctamente en Google Sheets.")
-                    # Mantener el marcador para la siguiente carga, pero puedes limpiar si prefieres:
-                    # st.session_state["clicked"] = None
                 except Exception as e:
                     st.error(f"❌ No se pudo guardar en Google Sheets.\n\n{e}")
 
@@ -165,7 +165,6 @@ with tabs[1]:
     if df.empty:
         st.info("Aún no hay registros.")
     else:
-        # Mapa con todas las encuestas
         mid_top, mid_bottom = st.container(), st.container()
         with mid_top:
             m2 = folium.Map(location=[9.948, -84.144], zoom_start=13, control_scale=True)
@@ -197,7 +196,6 @@ with tabs[1]:
                 file_name="encuestas_pavas.csv",
                 mime="text/csv",
             )
-
 
 
 
